@@ -14,7 +14,36 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      sensor_data: {
+        Row: {
+          created_at: string | null
+          distance: number
+          gesture: string
+          id: string
+          light: number
+          motion: boolean
+          sound: number
+        }
+        Insert: {
+          created_at?: string | null
+          distance: number
+          gesture?: string
+          id?: string
+          light: number
+          motion?: boolean
+          sound: number
+        }
+        Update: {
+          created_at?: string | null
+          distance?: number
+          gesture?: string
+          id?: string
+          light?: number
+          motion?: boolean
+          sound?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
