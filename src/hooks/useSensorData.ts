@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
 export interface SensorData {
   light: number;
@@ -29,18 +30,12 @@ export interface HistoryPoint {
   engagement: number;
 }
 
-const GESTURES = ["NONE", "LEFT", "RIGHT", "UP", "DOWN", "WAVE"];
-
-function randomInRange(min: number, max: number) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
 export function useSensorData() {
   const [sensorData, setSensorData] = useState<SensorData>({
-    light: 1200,
-    distance: 80,
-    motion: true,
-    sound: 400,
+    light: 0,
+    distance: 0,
+    motion: false,
+    sound: 0,
     gesture: "NONE",
     timestamp: Date.now(),
   });
@@ -83,30 +78,58 @@ export function useSensorData() {
     };
   }, [getEngagementScore]);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const newData: SensorData = {
-        light: randomInRange(400, 1800),
-        distance: randomInRange(20, 150),
-        motion: Math.random() > 0.25,
-        sound: randomInRange(100, 1000),
-        gesture: GESTURES[Math.floor(Math.random() * GESTURES.length)],
-        timestamp: Date.now(),
-      };
+  const processSensorRow = useCallback((row: any) => {
+    const data: SensorData = {
+      light: row.light,
+      distance: row.distance,
+      motion: row.motion,
+      sound: row.sound,
+      gesture: row.gesture,
+      timestamp: new Date(row.created_at).getTime(),
+    };
+    setSensorData(data);
+    setAlerts(generateAlerts(data));
 
-      setSensorData(newData);
-      setAlerts(generateAlerts(newData));
-
-      const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-      setHistory((prev) => {
-        const next = [...prev, { time: timeStr, light: newData.light, distance: newData.distance, engagement: getEngagementScore(newData) }];
-        return next.slice(-20);
-      });
-    }, 2000);
-
-    return () => clearInterval(interval);
+    const date = new Date(row.created_at);
+    const timeStr = `${date.getHours().toString().padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}:${date.getSeconds().toString().padStart(2, "0")}`;
+    setHistory((prev) => {
+      const next = [...prev, { time: timeStr, light: data.light, distance: data.distance, engagement: getEngagementScore(data) }];
+      return next.slice(-20);
+    });
   }, [generateAlerts, getEngagementScore]);
+
+  useEffect(() => {
+    // Fetch initial data
+    const fetchInitial = async () => {
+      const { data } = await (supabase as any)
+        .from("sensor_data")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      if (data && data.length > 0) {
+        const sorted = [...data].reverse();
+        sorted.forEach((row: any) => processSensorRow(row));
+      }
+    };
+    fetchInitial();
+
+    // Subscribe to realtime inserts
+    const channel = supabase
+      .channel("sensor_data_realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "sensor_data" },
+        (payload) => {
+          processSensorRow(payload.new);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [processSensorRow]);
 
   return { sensorData, alerts, history, engagementScore: getEngagementScore(sensorData), systemStatus: getSystemStatus(sensorData) };
 }
