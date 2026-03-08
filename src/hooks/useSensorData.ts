@@ -101,16 +101,15 @@ export function useSensorData() {
   useEffect(() => {
     // Fetch initial data
     const fetchInitial = async () => {
-      const { data } = await supabase
+      const { data } = await (supabase as any)
         .from("sensor_data")
         .select("*")
         .order("created_at", { ascending: false })
         .limit(20);
 
       if (data && data.length > 0) {
-        // Process history from oldest to newest
         const sorted = [...data].reverse();
-        sorted.forEach((row) => processSensorRow(row));
+        sorted.forEach((row: any) => processSensorRow(row));
       }
     };
     fetchInitial();
