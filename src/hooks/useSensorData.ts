@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import type { Tables } from "@/integrations/supabase/types";
 
 export interface SensorData {
   light: number;
@@ -30,6 +31,8 @@ export interface HistoryPoint {
   engagement: number;
 }
 
+type SensorRow = Tables<"sensor_data">;
+
 export function useSensorData() {
   const [sensorData, setSensorData] = useState<SensorData>({
     light: 0,
@@ -42,6 +45,7 @@ export function useSensorData() {
 
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
+  const seenIdsRef = useRef<Set<string>>(new Set());
 
   const generateAlerts = useCallback((data: SensorData) => {
     const newAlerts: Alert[] = [];
@@ -78,58 +82,102 @@ export function useSensorData() {
     };
   }, [getEngagementScore]);
 
-  const processSensorRow = useCallback((row: any) => {
+  const processSensorRow = useCallback((row: SensorRow) => {
+    if (!row?.id || seenIdsRef.current.has(row.id)) return;
+    seenIdsRef.current.add(row.id);
+
     const data: SensorData = {
       light: row.light,
       distance: row.distance,
       motion: row.motion,
       sound: row.sound,
       gesture: row.gesture,
-      timestamp: new Date(row.created_at).getTime(),
+      timestamp: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
     };
+
     setSensorData(data);
     setAlerts(generateAlerts(data));
 
-    const date = new Date(row.created_at);
+    const date = row.created_at ? new Date(row.created_at) : new Date();
     const timeStr = `${date.getHours().toString().padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}:${date.getSeconds().toString().padStart(2, "0")}`;
+
     setHistory((prev) => {
       const next = [...prev, { time: timeStr, light: data.light, distance: data.distance, engagement: getEngagementScore(data) }];
       return next.slice(-20);
     });
   }, [generateAlerts, getEngagementScore]);
 
-  useEffect(() => {
-    // Fetch initial data
-    const fetchInitial = async () => {
-      const { data } = await (supabase as any)
-        .from("sensor_data")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(20);
+  const loadRecentFromTable = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("sensor_data")
+      .select("id, light, distance, motion, sound, gesture, created_at")
+      .order("created_at", { ascending: false })
+      .limit(20);
 
-      if (data && data.length > 0) {
-        const sorted = [...data].reverse();
-        sorted.forEach((row: any) => processSensorRow(row));
+    if (error) {
+      throw error;
+    }
+
+    if (data?.length) {
+      [...data].reverse().forEach((row) => processSensorRow(row));
+    }
+  }, [processSensorRow]);
+
+  const loadRecentFromFunction = useCallback(async () => {
+    const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sensor-data?limit=20`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`Function fetch failed with status ${response.status}`);
+    }
+
+    const rows = (await response.json()) as SensorRow[];
+    if (Array.isArray(rows) && rows.length > 0) {
+      [...rows].reverse().forEach((row) => processSensorRow(row));
+    }
+  }, [processSensorRow]);
+
+  const syncLatestData = useCallback(async () => {
+    try {
+      await loadRecentFromTable();
+    } catch (tableError) {
+      console.warn("Direct table read failed, falling back to backend function:", tableError);
+      try {
+        await loadRecentFromFunction();
+      } catch (functionError) {
+        console.error("Function fallback also failed:", functionError);
       }
-    };
-    fetchInitial();
+    }
+  }, [loadRecentFromTable, loadRecentFromFunction]);
 
-    // Subscribe to realtime inserts
+  useEffect(() => {
+    void syncLatestData();
+
     const channel = supabase
       .channel("sensor_data_realtime")
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "sensor_data" },
         (payload) => {
-          processSensorRow(payload.new);
+          processSensorRow(payload.new as SensorRow);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR") {
+          console.warn("Realtime channel error. Polling will keep data updated.");
+        }
+      });
+
+    const intervalId = window.setInterval(() => {
+      void syncLatestData();
+    }, 3000);
 
     return () => {
+      window.clearInterval(intervalId);
       supabase.removeChannel(channel);
     };
-  }, [processSensorRow]);
+  }, [processSensorRow, syncLatestData]);
 
   return { sensorData, alerts, history, engagementScore: getEngagementScore(sensorData), systemStatus: getSystemStatus(sensorData) };
 }
+
